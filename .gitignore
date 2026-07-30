@@ -1,0 +1,25 @@
+# Model checkpoints
+*.pt
+*.pth
+*.pth.tar
+*.ckpt
+
+# Logs
+logs/
+runs/
+outputs/
+
+# Model directory
+HMDB-rgb-flow/models/
+
+# Python
+__pycache__/
+*.pyc
+
+# Cache / intermediate artifacts
+*.npz
+*.npy
+
+# OS
+.DS_Store
+Thumbs.db
