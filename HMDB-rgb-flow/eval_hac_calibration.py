@@ -227,11 +227,14 @@ def main():
     correct = (pred == labels).astype(np.int64)
     conf = probs.max(axis=1)  # model's stated confidence in its top prediction
 
+    np.savez(f"calib_dump_{args.drop or 'all'}_{'ON' if is_reliability else 'OFF'}.npz",
+         conf=conf, correct=correct, labels=labels)
     ece = ece_score(conf, correct, n_bins=args.n_bins)
     nll = nll_score(probs, labels, num_class)
     fd = compute_fd_metrics(conf, pred, labels)
 
     tag = "ALL-MODALITIES" if args.drop is None else f"DROP-{args.drop.upper()}"
+    
     print(f"\n=== HAC calibration  [{kind}]  [{tag}] ===")
     print("ECE  %6.4f  (%.2f%%)" % (ece, ece * 100))
     print("NLL  %6.4f" % nll)
