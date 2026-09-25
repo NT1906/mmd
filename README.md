@@ -188,10 +188,6 @@ The paper reports the mean ± std over the three seeds of the per-seed numbers p
 
 ---
 
-## Limitations
-
-The study uses a single dataset (HAC), a limited set of modality-loss configurations (one modality dropped at a time), and three seeds.
-
 ## Acknowledgements
 
 This code builds on the MultiOOD / ACR codebase, [MMAction2](https://github.com/open-mmlab/mmaction2), and [VGGSound](https://github.com/hche11/VGGSound). The HAC dataset is from SimMMDG (Dong et al., NeurIPS 2023).
