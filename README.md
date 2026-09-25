@@ -1,794 +1,207 @@
-# Reliability-Aware Multimodal Failure Detection
+# When Do Reliability Weights Help? A Multi-Seed Study of Calibrated Multimodal Prediction Under Modality Loss
 
-This repository contains the code for **reliability-aware multimodal failure detection** using video, optical flow, and audio modalities.
+Code for the AAAI 2026 student abstract by Nisarg Trivedi (Dhirubhai Ambani University).
 
-The project builds on the **ACR (Adaptive Confidence Regularization)** framework for multimodal failure detection and extends it with **per-modality reliability estimation**. The reliability module learns how trustworthy each modality is for a given sample and uses these estimates to reweight the multimodal representation before classification.
+We add a small **per-modality reliability head** to Adaptive Confidence Regularization (ACR) (Liu et al., CVPR 2026). Each head is trained on whether its modality alone classifies the sample correctly, and the resulting weights rescale the embeddings before fusion. We compare the method against plain ACR in **matched ON/OFF pairs over three seeds** on the Human–Animal–Cartoon (HAC) benchmark.
 
-The repository also contains the original multimodal/OOD evaluation pipelines for HMDB, EPIC, and related datasets.
+**Findings (mean over 3 seeds):**
 
----
+- **Failure detection:** no robust gain. All-modality ΔAURC is +0.6 ± 3.0. Two identical ACR runs differ by 6.6 AURC, and no modality-loss condition clears that noise floor.
+- **Calibration under severe modality loss:** when the dominant video modality is dropped, ECE falls from **0.143 ± 0.011 (ACR)** to **0.047 ± 0.005 (ours)**, and no seed reverses the gap. NLL is about the same (~0.77). Under mild loss (audio or flow dropped), plain ACR is slightly better calibrated.
+- **Interpretability:** on every seed the learned weights rank video > audio ≈ flow. They also track the AURC increase when each modality is removed (Pearson r = 0.94, Spearman ρ = 0.75, over 9 points).
 
-## Overview
-
-Multimodal models typically combine information from several modalities such as:
-
-* 🎥 RGB video
-* 🌊 Optical flow
-* 🔊 Audio
-
-A conventional fusion model treats these modalities similarly during fusion. However, the reliability of a modality can vary significantly from sample to sample. For example:
-
-* Audio may be noisy or unavailable.
-* Optical flow may be unreliable because of poor motion information.
-* Video may provide the strongest evidence for a particular action.
-
-This repository introduces a **reliability-aware fusion mechanism** that estimates a reliability score for each modality and uses it to adapt the fusion process.
-
-### Core idea
-
-For each modality \(k\), the model predicts a reliability value:
-
-$$
-r_k = \sigma(\mathrm{MLP}(E_k)), \qquad r_k \in [0,1]
-$$
-
-where \(E_k\) is the modality embedding.
-
-The embeddings are then reweighted:
-
-$$
-E'_k = r_k E_k
-$$
-
-and concatenated before the final fusion classifier:
-
-$$
-E_{\mathrm{fusion}}
-=
-[E'_v;E'_a;E'_f].
-$$
-
-The reliability heads are supervised using the correctness of the corresponding unimodal predictions, without requiring additional modality-reliability labels.
+Dataset: [Human-Animal-Cartoon on Hugging Face](https://huggingface.co/datasets/hdong51/Human-Animal-Cartoon)
 
 ---
 
-# Repository Structure
+## Method
 
-```text
-mmd-main/
-│
-├── HMDB-rgb-flow/
-│   ├── acr_modules.py
-│   │
-│   ├── train_video_flow.py
-│   ├── test_video_flow.py
-│   │
-│   ├── train_video_flow_CE.py
-│   ├── test_video_flow_CE.py
-│   │
-│   ├── train_video_flow_acr.py
-│   ├── test_video_flow_acr.py
-│   │
-│   ├── train_video_flow_hac_acr.py
-│   ├── test_video_flow_hac_acr.py
-│   │
-│   ├── train_video_flow_hac_reliability.py
-│   ├── test_video_flow_hac_reliability.py
-│   ├── test_video_flow_hac_acr_missing_modality.py
-│   ├── test_video_flow_hac_reliability.py
-│   │
-│   ├── eval_hac_calibration.py
-│   ├── eval_phase1_degradation.py
-│   ├── eval_phase2a_outlier_head.py
-│   ├── eval_phase3_missing_modality.py
-│   ├── plot_reliability_diagram.py
-│   │
-│   ├── dataloader_video_flow.py
-│   ├── dataloader_video_flow_audio.py
-│   ├── dataloader_video_flow_hac.py
-│   ├── dataloader_video_flow_hac_audio.py
-│   │
-│   ├── configs/
-│   ├── pretrained_models/
-│   ├── models/
-│   └── splits/
-│
-├── EPIC-rgb-flow/
-│   ├── train_video_flow.py
-│   ├── train_video_flow_audio_epic.py
-│   ├── train_video_flow_epic.py
-│   ├── test_video_flow.py
-│   ├── test_video_flow_audio_epic.py
-│   ├── test_video_flow_epic.py
-│   └── ...
-│
-├── VGGSound/
-│   ├── model.py
-│   ├── datasets/
-│   ├── models/
-│   ├── preprocess_audio.py
-│   ├── train/evaluation utilities
-│   └── data/
-│
-├── utils/
-│   ├── video2flow.py
-│   ├── flow_img2mp4.py
-│   └── generate_audio_files.py
-│
-├── metrics.py
-├── eval_video_flow_far_ood.py
-├── eval_video_flow_near_ood.py
-│
-├── environment.yml
-├── environment_exact.yml
-└── requirement.txt
+For each modality k ∈ {video, flow, audio} with embedding E_k:
+
+```
+r_k   = σ(MLP(E_k))                 # one hidden layer, width 128, soft-initialised so r_k ≈ 0.95
+Ẽ_k   = r_k · E_k                   # reliability-weighted embedding
+fused = Linear([Ẽ_v ; Ẽ_f ; Ẽ_a])   # C+1 logits (C = 7; the ACR outlier column is ignored at inference)
 ```
 
----
+- **Free supervision.** The target for r_k is `1[argmax(unimodal_logits_k) == y]`, so no extra labels are needed. The loss is `L_rel = mean_k BCE(r_k, t_k)`, with the target detached.
+- **Objective.** `L = L_cls + L_out + 2·L_acl + λ_rel·L_rel`, with λ_rel = 1. ACL and multimodal feature swapping (MFS) are the same as in ACR and act on the reweighted embeddings.
+- **Missing modality.** The absent modality is removed and the remaining weights are renormalised. The plain-ACR baseline has no weights to renormalise, so its absent embedding is set to zero.
+- **Only difference between ON and OFF:** whether the reliability head is active (`--reliability`). The script, seed and hyperparameters are the same.
 
-# Method
-
-The reliability-aware model consists of three modality-specific encoders:
-
-```text
-             RGB Video
-                 │
-           Video Encoder
-                 │
-              E_video
-                 │
-          Reliability Head
-                 │
-              r_video
-                 │
-              r·E_video
-                 │
-                 │
-Audio ──> Audio Encoder ──> E_audio ──> Reliability ──> r·E_audio
-                 │
-                 │
-Flow ──> Flow Encoder ──> E_flow ──> Reliability ──> r·E_flow
-                 │
-                 └───────────┬───────────────┘
-                             │
-                       Concatenation
-                             │
-                       Fusion Classifier
-                             │
-                       Failure Detection
-```
-
-## Reliability Learning
-
-The target for each reliability head is derived from the unimodal classifier:
-
-$$
-t_k =
-\mathbf{1}
-[
-\arg\max(\hat{y}_k)=y
-].
-$$
-
-The reliability loss is:
-
-$$
-\mathcal{L}_{rel}
-=
-\frac{1}{M}
-\sum_k
-\mathrm{BCE}(r_k,t_k).
-$$
-
-The complete training objective combines classification, outlier, ACR, and reliability losses:
-
-$$
-\mathcal{L}
-=
-\mathcal{L}_{cls}
-+
-\mathcal{L}_{outlier}
-+
-\lambda_{acl}\mathcal{L}_{acl}
-+
-\lambda_{rel}\mathcal{L}_{rel}.
-$$
-
-The current implementation uses:
-
-```text
-lambda_acl = 2.0
-lambda_rel = 1.0
-```
+| Modality | Backbone (pretraining)           | Dim  |
+| -------- | -------------------------------- | ---: |
+| Video    | SlowFast-R101 (Kinetics-400)     | 2304 |
+| Flow     | SlowOnly-R50 (Kinetics-400 flow) | 2048 |
+| Audio    | VGGSound ResNet-18               |  512 |
 
 ---
 
-# Modalities
+## Repository layout
 
-The main HAC/HMDB multimodal experiments use:
-
-| Modality     | Backbone                            | Feature dimension |
-| ------------ | ----------------------------------- | ----------------: |
-| Video        | SlowFast-R101                       |              2304 |
-| Optical Flow | SlowOnly-R50                        |              2048 |
-| Audio        | VGGSound / ResNet-based audio model |               512 |
-
-The fused representation therefore has:
+Everything used in the paper is under `HMDB-rgb-flow/`. The folder name comes from the original codebase; the experiments use **HAC only**.
 
 ```text
-2304 + 2048 + 512 = 4864 dimensions
+HMDB-rgb-flow/
+├── train_video_flow_hac_reliability.py         # main trainer: ON (--reliability) and OFF (plain ACR)
+├── test_video_flow_hac_reliability.py          # FD metrics + mean r_k for ON checkpoints, supports --drop
+├── test_video_flow_hac_acr_missing_modality.py # FD metrics for OFF checkpoints, supports --drop
+├── eval_hac_calibration.py                     # ECE / NLL (+ FD) for ON or OFF checkpoints, supports --drop
+├── plot_reliability_diagram.py                 # reliability diagrams from eval_hac_calibration.py dumps
+├── train_video_flow_hac_acr.py                 # standalone 3-modality ACR reproduction (sanity check)
+├── test_video_flow_hac_acr.py                  # test script for the standalone ACR reproduction
+├── acr_modules.py                              # ACL, MFS, MSP confidence, AURC/AUROC/FPR95
+├── dataloader_video_flow_hac_audio.py          # HAC loader (video + flow + audio), seeded val split
+├── dataloader_video_flow_hac.py                # HAC loader (video + flow only)
+├── splits/HAC_{train,test}_only_{human,animal,cartoon}.csv
+├── configs/  mmaction/  VGGSound/              # backbone configs and model code
+├── pretrained_models/                          # backbone weights go here (not tracked)
+├── calib_dump_video_{ON,OFF}.npz               # per-sample dumps for the drop-video reliability diagram
+└── reliability_drop_video.png                  # the resulting diagram
 ```
 
-before being passed to the fusion classifier.
+The following files are **not needed** to reproduce the paper:
+
+- `eval_phase*.py`: early HMDB exploration scripts.
+- The HMDB, Kinetics and UCF split files in `splits/`.
+- `PAPER_SKELETON.md` and `READ_ME_ACR_FIRST.md`: working notes.
 
 ---
 
-# Datasets
+## Installation
 
-The repository contains pipelines for multiple datasets, including:
-
-* **HMDB51**
-* **HAC**
-* **EPIC**
-* **VGGSound**
-* **Kinetics**
-* **UCF**
-
-The reliability-aware experiments primarily use the **HAC** dataset, while HMDB is also used for multimodal and reliability experiments.
-
-## HAC
-
-The HAC experiments use:
-
-* 3,381 video clips
-* 7 action classes
-* Video
-* Optical flow
-* Audio
-
-The experiments can use a validation split carved from the training data.
-
-Default validation fraction:
-
-```text
-0.15
-```
-
----
-
-# Installation
-
-The original environment is based on Python 3.8 and older versions of PyTorch/MMCV/MMACTION2.
-
-Create the environment using:
+The environment is Python 3.8 with older versions of PyTorch, MMCV and MMAction2.
 
 ```bash
-conda env create -f environment.yml
+conda env create -f environment.yml      # or environment_exact.yml for the fully pinned build
 conda activate acr
 ```
 
-Alternatively:
-
-```bash
-conda create -n acr python=3.8
-conda activate acr
-pip install -r requirement.txt
-```
-
-The pinned environment includes approximately:
-
-```text
-Python       3.8
-PyTorch      1.11.0 + CUDA 11.3
-TorchVision  0.12.0 + CUDA 11.3
-MMCV         1.2.7
-MMAction2    0.13.0
-NumPy        1.23.5
-Pandas       1.4.2
-SciPy        1.10.1
-SoundFile    0.11.0
-```
-
-> **Note:** These are legacy dependencies. Newer CUDA/PyTorch systems may require adapting the environment or using the provided exact environment configuration.
+Core versions: PyTorch 1.11.0 + CUDA 11.3, TorchVision 0.12.0, MMCV-full 1.2.7, MMAction2 0.13.0, NumPy 1.23.5, SciPy 1.10.1, SoundFile 0.11.0.
 
 ---
 
-# Data Preparation
+## Data
 
-## HMDB51
-
-The expected HMDB directory structure is:
+Download HAC from the [Hugging Face dataset page](https://huggingface.co/datasets/hdong51/Human-Animal-Cartoon) and arrange it as follows (`--datapath` points to the folder that **contains** `HAC/`):
 
 ```text
-~/data/hmdb51/
-├── video/
-│   ├── class_1/
-│   │   ├── video1.avi
-│   │   └── ...
-│   ├── class_2/
-│   └── ...
-│
-└── flow/
-    ├── video1_flow_x.mp4
-    ├── video1_flow_y.mp4
-    └── ...
+<datapath>/HAC/
+├── human/   ├── videos/<name>.mp4
+│            ├── flow/<name>_flow_x.mp4, <name>_flow_y.mp4
+│            └── audio/<name>.wav
+├── animal/  (same layout)
+└── cartoon/ (same layout)
 ```
 
-Use the original HMDB51 filenames and splits.
+The dataset has 3,381 clips and 7 action classes. The three domains are pooled into one closed-set problem, and the test set has 670 clips. A 15% validation split is taken from the training clips using the run seed (`--seed`, `--val_frac 0.15`).
 
-The repository's HMDB pipeline expects the original, unsanitized filenames.
+The helpers in `utils/` (`video2flow.py`, `flow_img2mp4.py`, `generate_audio_files.py`) can regenerate flow and audio from raw video if needed.
+
+## Pretrained backbones
+
+Place these in `HMDB-rgb-flow/pretrained_models/`:
+
+| File | Source |
+| ---- | ------ |
+| `slowfast_r101_8x8x1_256e_kinetics400_rgb_20210218-0dd54025.pth` | [MMAction2 model zoo](https://download.openmmlab.com/mmaction/recognition/slowfast/slowfast_r101_8x8x1_256e_kinetics400_rgb/slowfast_r101_8x8x1_256e_kinetics400_rgb_20210218-0dd54025.pth) |
+| `slowonly_r50_8x8x1_256e_kinetics400_flow_20200704-6b384243.pth` | [MMAction2 model zoo](https://download.openmmlab.com/mmaction/recognition/slowonly/slowonly_r50_8x8x1_256e_kinetics400_flow/slowonly_r50_8x8x1_256e_kinetics400_flow_20200704-6b384243.pth) |
+| `vggsound_avgpool.pth.tar` | [VGGSound "model H"](https://www.dropbox.com/s/jhyy73z5l0mjq23/vggsound_avgpool.pth.tar?dl=0) |
 
 ---
 
-# Pretrained Models
+## Reproducing the paper
 
-The main HMDB/HAC pipeline uses pretrained video, optical-flow, and audio models.
+Run all commands from `HMDB-rgb-flow/`. The paper uses seeds **0, 1, 2**. Checkpoint names do **not** include the seed, so give each run its own `--appen` suffix, otherwise later seeds overwrite earlier ones.
 
-Place the required checkpoints in:
-
-```text
-HMDB-rgb-flow/pretrained_models/
-```
-
-Important checkpoints include:
-
-```text
-slowfast_r101_8x8x1_256e_kinetics400_rgb_20210218-0dd54025.pth
-
-slowonly_r50_8x8x1_256e_kinetics400_flow_20200704-6b384243.pth
-
-vggsound_avgpool.pth.tar
-```
-
-These pretrained weights are required by the corresponding training/evaluation scripts.
-
----
-
-# Training
-
-Move into the HMDB directory:
+### 1. Train matched ON/OFF pairs
 
 ```bash
 cd HMDB-rgb-flow
+for SEED in 0 1 2; do
+  # ON: reliability-weighted fusion
+  python train_video_flow_hac_reliability.py --datapath <datapath> --seed $SEED \
+      --lr 1e-4 --bsz 16 --nepochs 50 --lambda_acl 2.0 --n_min 32 --n_max 256 \
+      --reliability --lambda_rel 1.0 \
+      --select aurc --patience 12 --save_best --appen hac_rel_s${SEED}_
+
+  # OFF: plain ACR, same script / seed / hyperparameters
+  python train_video_flow_hac_reliability.py --datapath <datapath> --seed $SEED \
+      --lr 1e-4 --bsz 16 --nepochs 50 --lambda_acl 2.0 --n_min 32 --n_max 256 \
+      --select aurc --patience 12 --save_best --appen hac_off_s${SEED}_
+done
 ```
 
-## ACR baseline
+The best checkpoint is chosen by validation AURC and saved to `models/log_video_flow_audio_HAC_..._best.pt`.
 
-The ACR baseline can be trained using:
+### 2. Failure detection, all modalities and each modality dropped (Table 1)
 
 ```bash
-python train_video_flow_hac_acr.py \
-    --datapath ~/data/hac/ \
-    --lr 1e-4 \
-    --bsz 16 \
-    --nepochs 50 \
-    --num_workers 2 \
-    --lambda_acl 2.0 \
-    --save_best \
-    --appen acr_
+# ON checkpoint (also prints mean r_video / r_audio / r_flow, used in the supplement's Table 2)
+python test_video_flow_hac_reliability.py --datapath <datapath> --seed $SEED --resumef <on_best.pt>
+python test_video_flow_hac_reliability.py --datapath <datapath> --seed $SEED --resumef <on_best.pt> --drop video   # also: flow, audio
+
+# OFF checkpoint
+python test_video_flow_hac_acr_missing_modality.py --datapath <datapath> --seed $SEED --resumef <off_best.pt>
+python test_video_flow_hac_acr_missing_modality.py --datapath <datapath> --seed $SEED --resumef <off_best.pt> --drop video   # also: flow, audio
 ```
+
+Each run prints AURC (×1000, lower is better), AUROC, FPR95 and accuracy. Confidence is the maximum softmax probability over the 7 real classes.
+
+**Modality importance** (supplement, Table 2 and Fig. 2) is the AURC with modality k dropped minus the all-modality AURC, both from the same ON checkpoint.
+
+### 3. Calibration (Table 2, Fig. 1)
+
+```bash
+python eval_hac_calibration.py --datapath <datapath> --seed $SEED --resumef <ckpt_best.pt>                # all modalities
+python eval_hac_calibration.py --datapath <datapath> --seed $SEED --resumef <ckpt_best.pt> --drop video   # also: flow, audio
+```
+
+The script detects whether a checkpoint is ON or OFF and applies the matching fusion and masking. It reports ECE (15 equal-width bins) and NLL, and writes `calib_dump_<drop>_<ON|OFF>.npz` for the reliability diagrams.
+
+### 4. Reliability diagram
+
+```bash
+python plot_reliability_diagram.py --on calib_dump_video_ON.npz --off calib_dump_video_OFF.npz \
+    --title "Drop video (severe)" --out reliability_drop_video.png
+```
+
+### Aggregation
+
+The paper reports the mean ± std over the three seeds of the per-seed numbers printed above. Every value was computed by reloading the saved checkpoint and evaluating on the test set, never read from a training log. ON/OFF pairs were checked by the classifier-head dimension stored in each checkpoint, not by filename.
+
+### Optional: ACR reproduction check
+
+`train_video_flow_hac_acr.py` / `test_video_flow_hac_acr.py` are a standalone 3-modality ACR implementation. They were used to confirm the pipeline before adding the reliability head. The OFF runs above produce the paper's baseline numbers.
 
 ---
 
-# Reliability-Aware Training
+## Metrics
 
-The reliability-aware model is trained using:
-
-```bash
-python train_video_flow_hac_reliability.py
-```
-
-A typical configuration is:
-
-```bash
-python train_video_flow_hac_reliability.py \
-    --datapath ~/data/hac/ \
-    --lr 1e-4 \
-    --bsz 16 \
-    --nepochs 50 \
-    --num_workers 2 \
-    --lambda_acl 2.0 \
-    --lambda_rel 1.0 \
-    --save_best \
-    --appen reliability_
-```
-
-The exact arguments available can be checked with:
-
-```bash
-python train_video_flow_hac_reliability.py --help
-```
+| Metric | Meaning | Better |
+| ------ | ------- | ------ |
+| AURC (×1000) | Area under the risk–coverage curve | lower |
+| AUROC (%) | Separation of correct vs. incorrect predictions | higher |
+| FPR95 (%) | FPR on errors at 95% TPR on correct predictions | lower |
+| ECE | Expected calibration error, 15 bins | lower |
+| NLL | Negative log-likelihood of the true class | lower |
 
 ---
 
-# Evaluation
+## Limitations
 
-After training, evaluate a reliability-aware checkpoint with:
+The study uses a single dataset (HAC), a limited set of modality-loss configurations (one modality dropped at a time), and three seeds.
 
-```bash
-python test_video_flow_hac_reliability.py \
-    --datapath ~/data/hac/ \
-    --resumef models/<CHECKPOINT>.pt
-```
+## Acknowledgements
 
-For a complete list of options:
+This code builds on the MultiOOD / ACR codebase, [MMAction2](https://github.com/open-mmlab/mmaction2), and [VGGSound](https://github.com/hche11/VGGSound). The HAC dataset is from SimMMDG (Dong et al., NeurIPS 2023).
 
-```bash
-python test_video_flow_hac_reliability.py --help
-```
+## References
 
----
-
-# Missing-Modality Evaluation
-
-One of the main experiments evaluates how the model behaves when a modality is unavailable at inference time.
-
-The reliability-aware model supports:
-
-```text
-All modalities
-Audio missing
-Flow missing
-Video missing
-```
-
-For example:
-
-```bash
-python test_video_flow_hac_reliability.py \
-    --datapath ~/data/hac/ \
-    --resumef models/<CHECKPOINT>.pt \
-    --drop audio
-```
-
-Other options:
-
-```bash
---drop flow
-```
-
-or:
-
-```bash
---drop video
-```
-
-When a modality is missing, its reliability is set to zero and the surviving modalities are renormalized.
-
-Conceptually:
-
-$$
-r_k = 0
-$$
-
-for the missing modality, followed by normalization of the remaining reliability weights.
-
-No additional retraining is required for the missing-modality evaluation.
-
----
-
-# Failure Detection Metrics
-
-The repository evaluates multimodal failure detection using metrics including:
-
-### AURC
-
-Area Under the Risk-Coverage Curve.
-
-Lower values indicate better selective prediction behavior.
-
-### AUROC
-
-Area Under the Receiver Operating Characteristic curve.
-
-Higher values indicate better separation between reliable and failed predictions.
-
-### FPR95
-
-False Positive Rate at 95% True Positive Rate.
-
-Lower values indicate better failure/OOD separation.
-
-### Accuracy
-
-Classification accuracy on the evaluated samples.
-
-### ECE
-
-Expected Calibration Error.
-
-Used to evaluate whether confidence estimates are calibrated.
-
-### NLL
-
-Negative Log-Likelihood.
-
-Used as an additional calibration metric.
-
----
-
-# Reliability Evaluation
-
-The repository contains scripts for analyzing the learned reliability estimates.
-
-Important scripts include:
-
-```text
-eval_hac_calibration.py
-eval_phase1_degradation.py
-eval_phase2a_outlier_head.py
-eval_phase3_missing_modality.py
-plot_reliability_diagram.py
-```
-
-These can be used to investigate:
-
-* Confidence degradation
-* Calibration
-* Missing-modality robustness
-* Outlier detection
-* Reliability behavior
-* Reliability diagrams
-
----
-
-# OOD Evaluation
-
-The repository also includes near-OOD and far-OOD evaluation pipelines.
-
-## Far-OOD
-
-```bash
-python eval_video_flow_far_ood.py
-```
-
-Supported post-processing methods include:
-
-```text
-MSP
-EBO
-MaxLogit
-Mahalanobis
-ASH
-ReAct
-kNN
-GEN
-ViM
-```
-
-Arguments can be inspected using:
-
-```bash
-python eval_video_flow_far_ood.py --help
-```
-
-## Near-OOD
-
-```bash
-python eval_video_flow_near_ood.py
-```
-
-The same family of post-processing methods is supported.
-
----
-
-# Baselines
-
-The repository contains implementations/evaluation pipelines for several approaches.
-
-These include:
-
-* Standard multimodal classification
-* Cross-Entropy baseline
-* ACR
-* Reliability-aware fusion
-* MSP-based confidence estimation
-* Several OOD post-processing methods
-
-The ACR implementation serves as the main baseline for the reliability-aware experiments.
-
----
-
-# Reproducibility
-
-For reproducible experiments, explicitly set the random seed:
-
-```bash
---seed 0
-```
-
-The reliability evaluation scripts also use deterministic CUDA settings where applicable.
-
-For multiple-seed experiments, run the same configuration with:
-
-```text
---seed 0
---seed 1
---seed 2
-```
-
-and report mean and standard deviation across runs.
-
----
-
-# Recommended Experiment Workflow
-
-A typical experiment can be organized as follows:
-
-### 1. Prepare datasets
-
-```text
-Dataset
-   ↓
-RGB videos
-   ↓
-Optical flow
-   ↓
-Audio
-```
-
-### 2. Prepare pretrained backbones
-
-```text
-SlowFast-R101
-SlowOnly-R50
-VGGSound
-```
-
-### 3. Train ACR baseline
-
-```bash
-python train_video_flow_hac_acr.py ...
-```
-
-### 4. Train reliability-aware model
-
-```bash
-python train_video_flow_hac_reliability.py ...
-```
-
-### 5. Evaluate full-modality performance
-
-```bash
-python test_video_flow_hac_reliability.py ...
-```
-
-### 6. Evaluate missing modalities
-
-```bash
---drop audio
---drop flow
---drop video
-```
-
-### 7. Evaluate calibration
-
-```bash
-python eval_hac_calibration.py ...
-```
-
-### 8. Generate reliability plots
-
-```bash
-python plot_reliability_diagram.py ...
-```
-
----
-
-# Key Research Questions
-
-The codebase is designed to investigate the following questions:
-
-### Q1. Does modality reliability improve failure detection?
-
-Compare:
-
-```text
-ACR
-vs.
-Reliability-aware ACR
-```
-
-using:
-
-```text
-AURC
-AUROC
-FPR95
-ACC
-```
-
-### Q2. Does reliability-aware fusion degrade gracefully?
-
-Remove individual modalities at inference:
-
-```text
-Audio
-Flow
-Video
-```
-
-and measure the resulting change in failure-detection performance.
-
-### Q3. Are learned reliability values meaningful?
-
-Compare learned reliability scores against independent measurements of modality importance or masking sensitivity.
-
-### Q4. Does reliability improve calibration?
-
-Evaluate:
-
-```text
-ECE
-NLL
-```
-
-under both full-modality and missing-modality conditions.
-
----
-
-# Important Implementation Details
-
-The reliability heads are modality-specific:
-
-```text
-Video → ReliabilityHead
-Audio → ReliabilityHead
-Flow  → ReliabilityHead
-```
-
-Each head produces a scalar value in:
-
-```text
-[0, 1]
-```
-
-The scalar is applied to every dimension of the corresponding modality embedding.
-
-For example:
-
-```python
-v_weighted = v_embedding * r_video
-```
-
-The three weighted embeddings are then concatenated:
-
-```python
-fusion = torch.cat(
-    (v_weighted, a_weighted, f_weighted),
-    dim=1
-)
-```
-
-This preserves the existing fusion classifier while introducing modality-level reliability weighting.
-
----
-
-# Project Status
-
-The repository contains both the original multimodal/OOD pipeline and the experimental reliability-aware extension.
-
-The reliability-aware experiments should be interpreted according to the exact dataset split, random seed, checkpoint, and evaluation protocol used.
-
-In particular, results from different protocols should **not** be directly compared unless their:
-
-* Dataset
-* Split
-* Modalities
-* Backbone
-* Training procedure
-* Evaluation procedure
-
-are matched.
-
-
----
-
-# Acknowledgements
-
-This project builds upon publicly available multimodal video understanding, OOD detection, and failure-detection research code, including components from the MMAction2 ecosystem and the ACR-based failure-detection pipeline.
-
-Please refer to the respective upstream projects and licenses before redistributing modified components.
-
----
-
+- Liu, M. et al. 2026. *Adaptive Confidence Regularization for Multimodal Failure Detection.* CVPR. arXiv:2603.02200.
+- Dong, H. et al. 2023. *SimMMDG: A Simple and Effective Framework for Multimodal Domain Generalization.* NeurIPS.
+- Geifman, Y. and El-Yaniv, R. 2017. *Selective Classification for Deep Neural Networks.* NeurIPS.
+- Guo, C. et al. 2017. *On Calibration of Modern Neural Networks.* ICML.
+- Hendrycks, D. and Gimpel, K. 2017. *A Baseline for Detecting Misclassified and Out-of-Distribution Examples in Neural Networks.* ICLR.
+- Ma, H. et al. 2023. *Calibrating Multimodal Learning.* ICML.
+- Feichtenhofer, C. et al. 2019. *SlowFast Networks for Video Recognition.* ICCV.
